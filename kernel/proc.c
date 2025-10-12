@@ -705,10 +705,11 @@ int print_sysinfo(int n){
     printf("Total number of active processes: %d\n", activeNum);
   }
   else if (n == 1){
-
+    extern int syscall_count;
+    printf("Total number of system calls since boot: %d\n", syscall_count);
   }
   else if (n == 2){
-  
+    printf("Total free memory pages: %d\n", count_free_pages());
   }
   else{
     printf("Invalid input!\n");

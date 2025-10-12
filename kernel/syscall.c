@@ -7,6 +7,9 @@
 #include "syscall.h"
 #include "defs.h"
 
+
+int syscall_count = 0;
+
 // Fetch the uint64 at addr from the current process.
 int
 fetchaddr(uint64 addr, uint64 *ip)
@@ -136,11 +139,16 @@ static uint64 (*syscalls[])(void) = {
 
 };
 
-void
-syscall(void)
-{
+
+// syscall - the main system call handler.
+//MODIFIED HERE TO COUNT SYSCALLS
+void syscall(void){
   int num;
   struct proc *p = myproc();
+
+  ///////COUNT HERE////////
+  syscall_count++;
+  /////////////////////////
 
   num = p->trapframe->a7;
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {

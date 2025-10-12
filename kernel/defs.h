@@ -63,6 +63,7 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+uint64          count_free_pages(void);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -109,6 +110,7 @@ void            procdump(void);
   //********custom syscall*********** */
 void            print_hello(int n);
 int             print_sysinfo(int n);
+extern int      syscall_count;
 
 
 
