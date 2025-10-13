@@ -25,6 +25,12 @@ int uptime(void);
 //********custom syscall*********** */
 int hello(int);
 int sysinfo(int);
+struct pinfo {
+    int ppid; 
+    int syscall_count; 
+    int page_usage;
+};
+int procinfo(struct pinfo *);
 
 
 // ulib.c

@@ -92,8 +92,7 @@ sys_uptime(void)
 
 
 //********custom syscall*********** */
-uint64
-sys_hello(void){
+uint64 sys_hello(void){
   int n;
   argint(0, &n);
   print_hello(n);
@@ -104,5 +103,12 @@ uint64 sys_sysinfo(void){
   int n;
   argint(0, &n);
   print_sysinfo(n);
+  return 0;
+}
+
+uint64 sys_procinfo(void){
+  uint64 uaddr;                 
+  argaddr(0, &uaddr);           
+  print_procinfo(uaddr);
   return 0;
 }

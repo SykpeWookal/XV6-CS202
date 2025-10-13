@@ -111,6 +111,7 @@ void            procdump(void);
 void            print_hello(int n);
 int             print_sysinfo(int n);
 extern int      syscall_count;
+void            print_procinfo(uint64 uaddr);
 
 
 

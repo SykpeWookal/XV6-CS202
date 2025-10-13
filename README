@@ -1,3 +1,4 @@
+PART 1 
 New System Call: print_sysinfo(int n)
 Overview
 
@@ -61,3 +62,77 @@ kernel/syscall.c	Added global counter sys_call_count
 kernel/kalloc.c	Added free_pages()
 kernel/defs.h	Added declarations
 user/user.h, user/usys.pl, kernel/syscall.h, kernel/syscall.c
+
+PART 2:
+New System Call: procinfo(struct pinfo *)
+
+
+Implementation Summary
+1️⃣ Add per-process syscall counter
+
+In kernel/proc.h, inside struct proc:
+int mysyscalls;
+
+
+Initialize in allocproc():
+
+p->mysyscalls = 0;
+
+2️⃣ Increment counters in syscall entry
+
+In kernel/syscall.c:
+
+struct proc *p = myproc();
+syscall_count++; // global counter (from lab1 part1)
+&p->mysyscalls++;    // per-process counter
+
+3️⃣ Define syscall number and table entry
+
+kernel/syscall.h
+#define SYS_procinfo  23  // (or next available ID)
+
+
+kernel/syscall.c
+extern uint64 sys_procinfo(void);
+[SYS_procinfo] = sys_procinfo,
+
+4️⃣ User-level definitions
+
+user/user.h
+struct pinfo { int ppid; int syscall_count; int page_usage; };
+int procinfo(struct pinfo *);
+
+user/usys.pl
+entry("procinfo");
+
+5️⃣ Kernel implementation
+
+Add to kernel/sysproc.c:
+
+uint64
+sys_procinfo(void)
+{
+  uint64 uaddr;
+  if (argaddr(0, &uaddr) < 0)
+    return -1;
+
+  struct proc *p = myproc();
+  struct pinfo k;
+
+  int ppid = 0;
+  acquire(&wait_lock);
+  if (p->parent)
+    ppid = p->parent->pid;
+  release(&wait_lock);
+
+  int pages = (p->sz + PGSIZE - 1) / PGSIZE;
+  int cnt = (p->syscalls > 0) ? p->syscalls - 1 : 0;
+
+  k.ppid = ppid;
+  k.syscall_count = cnt;
+  k.page_usage = pages;
+
+  if (copyout(p->pagetable, uaddr, (char*)&k, sizeof(k)) < 0)
+    return -1;
+  return 0;
+}

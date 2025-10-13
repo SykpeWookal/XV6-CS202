@@ -39,3 +39,4 @@ entry("uptime");
 #********custom syscall*********** */
 entry("hello");
 entry("sysinfo");
+entry("procinfo");

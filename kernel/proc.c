@@ -146,6 +146,10 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+
+  // Initialize custom syscall count
+  p->mysyscall_count = 0;
+
   return p;
 }
 
@@ -702,14 +706,14 @@ int print_sysinfo(int n){
       }
       release(&p->lock);
     }
-    printf("Total number of active processes: %d\n", activeNum);
+    printf("[SysInfo] Total number of active processes: %d\n", activeNum);
   }
   else if (n == 1){
     extern int syscall_count;
-    printf("Total number of system calls since boot: %d\n", syscall_count);
+    printf("[SysInfo] Total number of system calls since boot: %d\n", syscall_count);
   }
   else if (n == 2){
-    printf("Total free memory pages: %d\n", count_free_pages());
+    printf("[SysInfo] Total free memory pages: %d\n", count_free_pages());
   }
   else{
     printf("Invalid input!\n");
@@ -717,4 +721,36 @@ int print_sysinfo(int n){
   
   }
   return 0;
+}
+
+struct Userpinfo {
+    int ppid; 
+    int syscall_count; 
+    int page_usage;
+};
+void print_procinfo(uint64 uaddr){
+  struct proc *p = myproc();
+  struct Userpinfo k;               //struct to hold the info
+
+  // ppid： parent->pid
+  int ppid = 0;
+  acquire(&wait_lock);
+  if (p->parent)
+    ppid = p->parent->pid;
+  release(&wait_lock);
+
+  // page_usage：ceil(sz / PGSIZE)
+  int pages = (p->sz + PGSIZE - 1) / PGSIZE;
+
+  // syscall_count：not content procinfo's call
+  int cnt = p->mysyscall_count;
+  if (cnt > 0) cnt -= 1;
+
+  k.ppid = ppid;
+  k.syscall_count = cnt;
+  k.page_usage = pages;
+
+  // copy to user address
+  copyout(p->pagetable, uaddr, (char*)&k, sizeof(k));
+
 }

@@ -107,6 +107,7 @@ extern uint64 sys_close(void);
 //********custom syscall*********** */
 extern uint64 sys_hello(void);
 extern uint64 sys_sysinfo(void);
+extern uint64 sys_procinfo(void);
 
 
 // An array mapping syscall numbers from syscall.h
@@ -136,6 +137,7 @@ static uint64 (*syscalls[])(void) = {
 //********custom syscall*********** */
 [SYS_hello]   sys_hello,
 [SYS_sysinfo] sys_sysinfo,
+[SYS_procinfo] sys_procinfo,
 
 };
 
@@ -148,6 +150,9 @@ void syscall(void){
 
   ///////COUNT HERE////////
   syscall_count++;
+  /////////////////////////
+  /////LOCAL CALL COUNT////
+  p->mysyscall_count++;
   /////////////////////////
 
   num = p->trapframe->a7;
