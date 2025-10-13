@@ -1,3 +1,11 @@
+Test:
+    run:
+        make qemu
+        cd /user
+        $ Testsysinfo 0/1/2
+        $ lab1_test 65536 2
+
+
 PART 1 
 New System Call: print_sysinfo(int n)
 Overview
