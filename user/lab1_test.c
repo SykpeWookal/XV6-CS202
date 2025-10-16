@@ -7,8 +7,7 @@ void print_sysinfo(void){
     sysinfo(0);
     sysinfo(1);
     sysinfo(2);
-    //printf("[sysinfo] active proc: %d, syscalls: %d, free pages: %d\n",
-    n_active_proc, n_syscalls, n_free_pages);
+    //printf("[sysinfo] active proc: %d, syscalls: %d, free pages: %d\n",n_active_proc, n_syscalls, n_free_pages);
 }
 
 int main(int argc, char *argv[]){
