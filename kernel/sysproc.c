@@ -112,3 +112,16 @@ uint64 sys_procinfo(void){
   print_procinfo(uaddr);
   return 0;
 }
+
+
+uint64 sys_sched_statistics(void){
+  print_sched_statistics();
+  return 0;
+}
+
+uint64 sys_sched_tickets(void){
+  int n;
+  argint(0, &n);
+  exec_sched_tickets(n);
+  return 0;
+}

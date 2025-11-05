@@ -107,4 +107,9 @@ struct proc {
 
   //********custom syscall*********** */
   int mysyscall_count;           // Number of syscalls made by this process
+  //********custom scheduler*********** */
+  int tickets;          // Lottery tickets
+  int stride;           // Stride value for stride scheduling
+  int pass;             // Stride Pass for stride scheduling
+  int sched_count;      // Number of times this process has been scheduled
 };

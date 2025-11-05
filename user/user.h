@@ -31,6 +31,8 @@ struct pinfo {
     int page_usage;
 };
 int procinfo(struct pinfo *);
+int sched_statistics(void);
+int sched_tickets(int);
 
 
 // ulib.c

@@ -149,6 +149,12 @@ found:
 
   // Initialize custom syscall count
   p->mysyscall_count = 0;
+  
+  // Initialize custom scheduler
+  p->tickets = 7;  // Default 7 ticket
+  p->stride = 10000/p->tickets;
+  p->pass = p->stride;
+  p->sched_count = 0;  // Initialize scheduling count
 
   return p;
 }
@@ -314,6 +320,12 @@ fork(void)
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
+  // Copy scheduler-related fields from parent
+  np->tickets = p->tickets;
+  np->stride = p->stride;
+  np->pass = p->pass;
+  np->sched_count = 0;  // Child process starts with 0 scheduling count
+
   pid = np->pid;
 
   release(&np->lock);
@@ -438,6 +450,20 @@ wait(uint64 addr)
   }
 }
 
+
+
+
+
+
+// pseudo random generator (https://stackoverflow.com/a/7603688)
+unsigned short lfsr = 0xACE1u;
+unsigned short bit;
+unsigned short rand(){
+  bit = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1;
+  return lfsr = (lfsr >> 1) | (bit << 15);
+}
+
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -450,29 +476,145 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-  
   c->proc = 0;
-  for(;;){
-    // Avoid deadlock by ensuring that devices can interrupt.
-    intr_on();
 
+  //********custom scheduler*********** */
+  #if defined(LOTTERY)
+    //*********Lottery scheduler*********************//
+    printf("Lottery scheduler\n");
+    int total_tickets = 0;
+    int winning_ticket;
+    int cumulative = 0;
+    struct proc *chosen = 0;
+    for(;;){
+      intr_on();
+
+      //calculate total tickets
+      total_tickets = 0;
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE) {
+          total_tickets += p->tickets;
+        }
+        release(&p->lock);
+      }
+
+      if(total_tickets == 0) {  //means no process is runnable
+        continue;
+      }
+
+      //generate winning ticket
+      winning_ticket = rand() % total_tickets;
+
+      //find the process with the winning ticket
+      cumulative = 0;
+      chosen = 0;
+
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE) {
+          cumulative += p->tickets;
+          if(winning_ticket < cumulative && chosen == 0) {
+            chosen = p;
+            // Keep holding the lock for chosen process
+            // Don't release it yet
+          } else {
+            release(&p->lock);
+          }
+        } else {
+          release(&p->lock);
+        }
+      }
+
+      // If we found a process, schedule it
+      if(chosen != 0) {
+        // Double-check the state is still RUNNABLE
+        if(chosen->state == RUNNABLE) {
+          chosen->state = RUNNING;
+          c->proc = chosen;
+          chosen->sched_count++;  // Increment scheduling count
+          swtch(&c->context, &chosen->context);
+          c->proc = 0;
+        }
+        release(&chosen->lock);
+      }
+    }
+
+
+
+  #elif defined(STRIDE)
+  //*********Stride scheduler*********************//
+  printf("Stride scheduler\n");
+  int min_pass;
+  struct proc *chosen = 0;
+  
+  for(;;){
+    intr_on();
+    
+    // Reset for each iteration
+    min_pass = 0x7FFFFFFF;  // Initialize to maximum int value
+    chosen = 0;
+    
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
+      if(p->state == RUNNABLE && p->pass < min_pass) {
+        min_pass = p->pass;
+        // Release previous chosen process's lock if exists
+        if(chosen != 0) {
+          release(&chosen->lock);
+        }
+        chosen = p;
+        // Keep holding the lock for chosen process
+        // Don't release it yet
+      } else {
+        release(&p->lock);
+      }
+    }
+    
+    if(chosen != 0) {
+      // Double-check the state is still RUNNABLE
+      if(chosen->state == RUNNABLE) {
+        chosen->state = RUNNING;
+        c->proc = chosen;
+        
+        // update pass value
+        #define BIG_CONSTANT 10000
+        chosen->pass += (BIG_CONSTANT / chosen->tickets);
+        chosen->sched_count++;  // Increment scheduling count
+        swtch(&c->context, &chosen->context);
         c->proc = 0;
       }
-      release(&p->lock);
+      release(&chosen->lock);
     }
+  
   }
+
+
+  #else
+    printf("Round-Robin scheduler\n");
+    for(;;){
+      // Avoid deadlock by ensuring that devices can interrupt.
+      intr_on();
+
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE) {
+          // Switch to chosen process.  It is the process's job
+          // to release its lock and then reacquire it
+          // before jumping back to us.
+          p->state = RUNNING;
+          c->proc = p;
+          p->sched_count++;  // Increment scheduling count
+          swtch(&c->context, &p->context);
+
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+        }
+        release(&p->lock);
+      }
+    }
+  #endif
 }
 
 // Switch to scheduler.  Must hold only p->lock
@@ -754,3 +896,33 @@ void print_procinfo(uint64 uaddr){
   copyout(p->pagetable, uaddr, (char*)&k, sizeof(k));
 
 }
+
+
+
+void print_sched_statistics(void){
+  struct proc *p;
+  
+  // Traverse all processes and print statistics
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      // Print: PID(name): tickets: xxx, ticks: xxx
+      printf("%d(%s): tickets: %d, ticks: %d\n", 
+             p->pid, p->name, p->tickets, p->sched_count);
+    }
+    release(&p->lock);
+  }
+}
+
+void exec_sched_tickets(int n){
+  struct proc *p = myproc();
+  
+  // Check if tickets value is valid (must be positive and <= 10000)
+  if(n < 1 || n > 10000) {
+    return;  // Invalid ticket value, silently return
+  }
+  
+  acquire(&p->lock);
+  p->tickets = n;
+  release(&p->lock);
+} 
