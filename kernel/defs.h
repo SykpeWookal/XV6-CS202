@@ -114,6 +114,7 @@ extern int      syscall_count;
 void            print_procinfo(uint64 uaddr);
 void            print_sched_statistics(void);
 void            exec_sched_tickets(int n);
+int             clone(uint64);
 
 
 

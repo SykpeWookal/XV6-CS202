@@ -125,3 +125,10 @@ uint64 sys_sched_tickets(void){
   exec_sched_tickets(n);
   return 0;
 }
+
+// Lab3: clone system call
+uint64 sys_clone(void){
+  uint64 stack;
+  argaddr(0, &stack);
+  return clone(stack);
+}

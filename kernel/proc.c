@@ -156,6 +156,9 @@ found:
   p->pass = p->stride;
   p->sched_count = 0;  // Initialize scheduling count
 
+  // Lab3: Initialize thread_id to 0 (parent process)
+  p->thread_id = 0;
+
   return p;
 }
 
@@ -165,11 +168,20 @@ found:
 static void
 freeproc(struct proc *p)
 {
-  if(p->trapframe)
+  if(p->trapframe) {
+    // Lab3: If this is a thread (thread_id > 0), unmap its trapframe first
+    if(p->thread_id > 0 && p->pagetable) {
+      uvmunmap(p->pagetable, TRAPFRAME - PGSIZE * p->thread_id, 1, 0);
+    }
     kfree((void*)p->trapframe);
+  }
   p->trapframe = 0;
-  if(p->pagetable)
+  
+  // Lab3: Only free page table for parent process (thread_id == 0)
+  // Threads share the parent's page table
+  if(p->thread_id == 0 && p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -178,6 +190,7 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->thread_id = 0;
   p->state = UNUSED;
 }
 
@@ -325,6 +338,89 @@ fork(void)
   np->stride = p->stride;
   np->pass = p->pass;
   np->sched_count = 0;  // Child process starts with 0 scheduling count
+
+  pid = np->pid;
+
+  release(&np->lock);
+
+  acquire(&wait_lock);
+  np->parent = p;
+  release(&wait_lock);
+
+  acquire(&np->lock);
+  np->state = RUNNABLE;
+  release(&np->lock);
+
+  return pid;
+}
+
+// Lab3: clone() system call - create a child thread sharing parent's address space
+int
+clone(uint64 stack)
+{
+  int i, pid;
+  struct proc *np;
+  struct proc *p = myproc();
+
+  // Basic sanity check: stack must not be null
+  if(stack == 0)
+    return -1;
+
+  // Allocate process (PCB and trapframe)
+  if((np = allocproc()) == 0){
+    return -1;
+  }
+
+  // Calculate thread_id for the new thread
+  // Find the next available thread_id by counting existing threads
+  int next_tid = 1;
+  struct proc *pp;
+  acquire(&wait_lock);
+  for(pp = proc; pp < &proc[NPROC]; pp++){
+    if(pp->parent == p && pp->thread_id >= next_tid){
+      next_tid = pp->thread_id + 1;
+    }
+  }
+  release(&wait_lock);
+  
+  np->thread_id = next_tid;
+
+  // Share parent's page table - do NOT create a new one
+  // First, free the page table that allocproc() created
+  proc_freepagetable(np->pagetable, 0);
+  np->pagetable = p->pagetable;
+
+  // Map the new thread's trapframe to user space
+  // Location: TRAPFRAME - PGSIZE * thread_id
+  if(mappages(np->pagetable, TRAPFRAME - PGSIZE * np->thread_id, PGSIZE,
+              (uint64)(np->trapframe), PTE_R | PTE_W) < 0){
+    kfree((void*)np->trapframe);
+    np->trapframe = 0;
+    np->pagetable = 0;
+    np->state = UNUSED;
+    release(&np->lock);
+    return -1;
+  }
+
+  // Copy parent's trapframe to child
+  *(np->trapframe) = *(p->trapframe);
+
+  // Set child's return value to 0
+  np->trapframe->a0 = 0;
+  
+  // Set child's user stack (stack grows downward, so use the provided address as top)
+  np->trapframe->sp = stack;
+
+  // Share memory size
+  np->sz = p->sz;
+
+  // Copy file descriptors (optional per doc, but we do it for safety)
+  for(i = 0; i < NOFILE; i++)
+    if(p->ofile[i])
+      np->ofile[i] = filedup(p->ofile[i]);
+  np->cwd = idup(p->cwd);
+
+  safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
 

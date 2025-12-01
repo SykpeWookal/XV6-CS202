@@ -33,6 +33,7 @@ struct pinfo {
 int procinfo(struct pinfo *);
 int sched_statistics(void);
 int sched_tickets(int);
+int clone(void*);
 
 
 // ulib.c

@@ -112,4 +112,7 @@ struct proc {
   int stride;           // Stride value for stride scheduling
   int pass;             // Stride Pass for stride scheduling
   int sched_count;      // Number of times this process has been scheduled
+
+  //********Lab3: Thread support*********** */
+  int thread_id;        // 0 for parent process, >0 for child threads
 };

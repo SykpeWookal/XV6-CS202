@@ -1,18 +1,41 @@
-# Lab 2: Process Scheduling in xv6
+# Lab 3: xv6 Threads
 
 ## 1. Introduction
 
-This lab implements two new scheduling algorithms in xv6: Lottery scheduling and Stride scheduling. The original xv6 uses a simple round-robin scheduler that selects processes in order. We replace it with proportional-share schedulers that allocate CPU time based on process priorities represented by tickets.
+This lab implements kernel-level thread support in xv6. We implement a new system call `clone()` to create kernel-level threads that share the parent's address space. Based on `clone()`, we build a user-level thread library consisting of `thread_create()`, `lock_acquire()`, and `lock_release()` for thread management. The implementation is verified using a multi-threaded frisbee simulation program.
 
 ## 2. Design Overview
 
-### 2.1 Lottery Scheduling
+### 2.1 Thread vs Process
 
-Lottery scheduling assigns tickets to each process. The more tickets a process has, the higher probability it gets selected. The scheduler randomly picks a winning ticket and selects the process whose ticket range contains the winning number.
+The key difference between threads and processes lies in address space management:
 
-### 2.2 Stride Scheduling
+| Aspect | Process (fork) | Thread (clone) |
+|--------|---------------|----------------|
+| Address Space | New copy | Shared with parent |
+| Page Table | New page table | Share parent's page table |
+| User Stack | Inherited (copied) | Caller-provided |
+| Trapframe | New, mapped at TRAPFRAME | New, mapped at different location |
+| Kernel Stack | New | New |
 
-Stride scheduling uses a deterministic approach. Each process has a stride value calculated as `BIG_CONSTANT / tickets`. The scheduler always picks the process with the smallest pass value. After running, the process's pass value is incremented by its stride.
+### 2.2 Trapframe Mapping Strategy
+
+Each thread needs its own trapframe for saving/restoring registers during traps. To avoid overlap, we map each thread's trapframe to a unique virtual address:
+
+```
+Virtual Address Space (Top):
+    ┌───────────────────┐ TRAMPOLINE
+    │   trampoline      │ (shared, no re-mapping needed)
+    ├───────────────────┤ TRAPFRAME
+    │ Parent trapframe  │ (thread_id = 0)
+    ├───────────────────┤ TRAPFRAME - PGSIZE
+    │ Thread 1 trapframe│ (thread_id = 1)
+    ├───────────────────┤ TRAPFRAME - 2*PGSIZE
+    │ Thread 2 trapframe│ (thread_id = 2)
+    └───────────────────┘
+```
+
+Formula: `TRAPFRAME - PGSIZE * thread_id`
 
 ## 3. Implementation Details
 
@@ -20,231 +43,392 @@ Stride scheduling uses a deterministic approach. Each process has a stride value
 
 **File: `kernel/proc.h`**
 
-Added four fields to the `struct proc`:
+Added `thread_id` field to `struct proc`:
 ```c
-int tickets;          // Lottery tickets
-int stride;           // Stride value for stride scheduling
-int pass;             // Stride Pass for stride scheduling
-int sched_count;      // Number of times this process has been scheduled
+struct proc {
+  // ... existing fields ...
+  
+  //********Lab3: Thread support*********** */
+  int thread_id;        // 0 for parent process, >0 for child threads
+};
 ```
 
-- `tickets`: Number of lottery tickets (1-10000)
-- `stride`: Calculated as `10000 / tickets`
-- `pass`: Current pass value, starts at `stride`
-- `sched_count`: Counter incremented each time the process is scheduled
+- `thread_id = 0`: Parent process (normal process)
+- `thread_id > 0`: Child thread created by clone()
 
 ### 3.2 Process Initialization
 
 **File: `kernel/proc.c` - `allocproc()`**
 
-When a new process is created, initialize scheduler fields:
+Initialize `thread_id` to 0 for new processes:
 ```c
-p->tickets = 7;  // Default 7 tickets
-p->stride = 10000 / p->tickets;
-p->pass = p->stride;
-p->sched_count = 0;
+// Lab3: Initialize thread_id to 0 (parent process)
+p->thread_id = 0;
 ```
 
-**File: `kernel/proc.c` - `fork()`**
+### 3.3 Clone System Call Implementation
 
-Child processes inherit parent's scheduler fields:
+**File: `kernel/proc.c` - `clone()`**
+
+The `clone()` system call creates a child thread:
+
 ```c
-np->tickets = p->tickets;
-np->stride = p->stride;
-np->pass = p->pass;
-np->sched_count = 0;  // Child starts with 0 scheduling count
+int clone(uint64 stack)
+{
+  int i, pid;
+  struct proc *np;
+  struct proc *p = myproc();
+
+  // Basic sanity check: stack must not be null
+  if(stack == 0)
+    return -1;
+
+  // Allocate process (PCB and trapframe)
+  if((np = allocproc()) == 0){
+    return -1;
+  }
+
+  // Calculate thread_id for the new thread
+  int next_tid = 1;
+  struct proc *pp;
+  acquire(&wait_lock);
+  for(pp = proc; pp < &proc[NPROC]; pp++){
+    if(pp->parent == p && pp->thread_id >= next_tid){
+      next_tid = pp->thread_id + 1;
+    }
+  }
+  release(&wait_lock);
+  
+  np->thread_id = next_tid;
+
+  // Share parent's page table - do NOT create a new one
+  proc_freepagetable(np->pagetable, 0);
+  np->pagetable = p->pagetable;
+
+  // Map the new thread's trapframe to user space
+  if(mappages(np->pagetable, TRAPFRAME - PGSIZE * np->thread_id, PGSIZE,
+              (uint64)(np->trapframe), PTE_R | PTE_W) < 0){
+    kfree((void*)np->trapframe);
+    np->trapframe = 0;
+    np->pagetable = 0;
+    np->state = UNUSED;
+    release(&np->lock);
+    return -1;
+  }
+
+  // Copy parent's trapframe to child
+  *(np->trapframe) = *(p->trapframe);
+
+  // Set child's return value to 0
+  np->trapframe->a0 = 0;
+  
+  // Set child's user stack
+  np->trapframe->sp = stack;
+
+  // Share memory size
+  np->sz = p->sz;
+
+  // Copy file descriptors
+  for(i = 0; i < NOFILE; i++)
+    if(p->ofile[i])
+      np->ofile[i] = filedup(p->ofile[i]);
+  np->cwd = idup(p->cwd);
+
+  safestrcpy(np->name, p->name, sizeof(p->name));
+  pid = np->pid;
+
+  release(&np->lock);
+
+  acquire(&wait_lock);
+  np->parent = p;
+  release(&wait_lock);
+
+  acquire(&np->lock);
+  np->state = RUNNABLE;
+  release(&np->lock);
+
+  return pid;
+}
 ```
-
-### 3.3 Lottery Scheduler Implementation
-
-**File: `kernel/proc.c` - `scheduler()`**
-
-The lottery scheduler works in three steps:
-
-1. **Calculate total tickets**: Sum all tickets from RUNNABLE processes
-2. **Generate winning ticket**: Use random number generator: `winning_ticket = rand() % total_tickets`
-3. **Select process**: Find the process whose cumulative ticket range contains the winning ticket
 
 Key implementation details:
-- Uses LFSR (Linear Feedback Shift Register) for random number generation
-- Two-pass algorithm: first pass calculates total, second pass selects process
-- Maintains lock on chosen process until `swtch()` completes to avoid race conditions
-- Double-checks process state before scheduling
+1. **Stack parameter check**: Validates that the stack pointer is not null
+2. **Thread ID assignment**: Finds the next available thread_id by scanning existing child threads
+3. **Page table sharing**: Frees the page table created by `allocproc()` and shares parent's page table
+4. **Trapframe mapping**: Maps thread's trapframe to `TRAPFRAME - PGSIZE * thread_id`
+5. **Stack setup**: Sets the child's stack pointer to the caller-provided stack address
+
+### 3.4 Modified freeproc()
+
+**File: `kernel/proc.c` - `freeproc()`**
+
+Modified to handle thread-specific cleanup:
 
 ```c
-// Random number generator (LFSR)
-unsigned short lfsr = 0xACE1u;
-unsigned short rand(){
-  bit = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1;
-  return lfsr = (lfsr >> 1) | (bit << 15);
-}
-```
-
-### 3.4 Stride Scheduler Implementation
-
-**File: `kernel/proc.c` - `scheduler()`**
-
-The stride scheduler:
-1. Finds the RUNNABLE process with minimum `pass` value
-2. Updates `pass` value: `pass += (BIG_CONSTANT / tickets)` after scheduling
-3. Uses `BIG_CONSTANT = 10000` for stride calculation
-
-Important implementation details:
-- Initializes `min_pass = 0x7FFFFFFF` (maximum int) to ensure first process is found
-- Must release previous chosen process's lock when updating `chosen` to avoid lock leak
-- Maintains lock on chosen process until `swtch()` completes
-
-**Critical bug fix**: When updating `chosen` to a new process, we must release the previous `chosen` process's lock:
-```c
-if(p->state == RUNNABLE && p->pass < min_pass) {
-  min_pass = p->pass;
-  if(chosen != 0) {
-    release(&chosen->lock);  // Release previous chosen's lock
+static void
+freeproc(struct proc *p)
+{
+  if(p->trapframe) {
+    // Lab3: If this is a thread (thread_id > 0), unmap its trapframe first
+    if(p->thread_id > 0 && p->pagetable) {
+      uvmunmap(p->pagetable, TRAPFRAME - PGSIZE * p->thread_id, 1, 0);
+    }
+    kfree((void*)p->trapframe);
   }
-  chosen = p;
-  // Keep holding p->lock
+  p->trapframe = 0;
+  
+  // Lab3: Only free page table for parent process (thread_id == 0)
+  if(p->thread_id == 0 && p->pagetable)
+    proc_freepagetable(p->pagetable, p->sz);
+  
+  p->pagetable = 0;
+  p->sz = 0;
+  p->pid = 0;
+  p->parent = 0;
+  p->name[0] = 0;
+  p->chan = 0;
+  p->killed = 0;
+  p->xstate = 0;
+  p->thread_id = 0;
+  p->state = UNUSED;
 }
 ```
 
-### 3.5 System Calls
+Key points:
+- **Threads**: Only unmap their own trapframe; do NOT free the shared page table
+- **Parent process**: Free the entire page table (including all memory)
+
+### 3.5 Modified usertrapret()
+
+**File: `kernel/trap.c` - `usertrapret()`**
+
+Modified to pass correct trapframe address based on thread_id:
+
+```c
+// jump to userret in trampoline.S
+uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
+
+// Lab3: Pass the correct trapframe address based on thread_id
+if(p->thread_id == 0) {
+  ((void (*)(uint64,uint64))trampoline_userret)(TRAPFRAME, satp);
+} else {
+  ((void (*)(uint64,uint64))trampoline_userret)(TRAPFRAME - PGSIZE * p->thread_id, satp);
+}
+```
+
+### 3.6 Modified trampoline.S
+
+**File: `kernel/trampoline.S`**
+
+The new `userret` function accepts two parameters:
+- `a0`: Trapframe address (varies by thread)
+- `a1`: Page table (satp)
+
+Key changes:
+```asm
+.globl userret
+userret:
+    # userret(TRAPFRAME, pagetable)
+    # a0: TRAPFRAME, in user page table.
+    # a1: user page table, for satp.
+
+    # switch to the user page table.
+    csrw satp, a1
+    sfence.vma zero, zero
+
+    # ... restore registers from trapframe at a0 ...
+```
+
+### 3.7 System Call Registration
 
 **File: `kernel/syscall.h`**
 ```c
-#define SYS_sched_statistics 25
-#define SYS_sched_tickets 26
+#define SYS_clone 27
+```
+
+**File: `kernel/syscall.c`**
+```c
+extern uint64 sys_clone(void);
+
+static uint64 (*syscalls[])(void) = {
+  // ... existing entries ...
+  [SYS_clone]   sys_clone,
+};
 ```
 
 **File: `kernel/sysproc.c`**
+```c
+uint64 sys_clone(void){
+  uint64 stack;
+  argaddr(0, &stack);
+  return clone(stack);
+}
+```
 
-**`sys_sched_statistics()`**: Prints scheduling statistics for all processes
-- Format: `PID(name): tickets: xxx, ticks: xxx`
-- Traverses all processes and prints their tickets and scheduling count
-- Uses process locks to protect data access
+**File: `kernel/defs.h`**
+```c
+int             clone(uint64);
+```
 
-**`sys_sched_tickets(int n)`**: Sets calling process's ticket value
-- Validates ticket value (1-10000)
-- Returns 0 on success
-- Silently ignores invalid values
+**File: `user/user.h`**
+```c
+int clone(void*);
+```
 
-**File: `kernel/proc.c`**
+**File: `user/usys.pl`**
+```perl
+entry("clone");
+```
 
-**`print_sched_statistics()`**: Kernel function that prints statistics
+## 4. User-Level Thread Library
+
+### 4.1 Thread Library Header
+
+**File: `user/thread.h`**
 
 ```c
-void print_sched_statistics(void){
-  struct proc *p;
-  for(p = proc; p < &proc[NPROC]; p++) {
-    acquire(&p->lock);
-    if(p->state != UNUSED) {
-      printf("%d(%s): tickets: %d, ticks: %d\n", 
-             p->pid, p->name, p->tickets, p->sched_count);
-    }
-    release(&p->lock);
+#ifndef _THREAD_H_
+#define _THREAD_H_
+
+typedef struct lock_t {
+  uint locked;
+} lock_t;
+
+int thread_create(void *(*start_routine)(void*), void *arg);
+void lock_init(lock_t* lock);
+void lock_acquire(lock_t* lock);
+void lock_release(lock_t* lock);
+
+#endif
+```
+
+### 4.2 Thread Library Implementation
+
+**File: `user/thread.c`**
+
+**thread_create()**:
+```c
+int thread_create(void *(*start_routine)(void*), void *arg)
+{
+  // Allocate a user stack of PGSIZE bytes
+  void *stack = malloc(PGSIZE);
+  if(stack == 0)
+    return -1;
+
+  // Stack grows downward in RISC-V, so pass the top of the stack
+  int ret = clone((char*)stack + PGSIZE);
+  
+  if(ret == 0) {
+    // Child thread: execute the start routine and exit
+    (*start_routine)(arg);
+    exit(0);
+  } else if(ret > 0) {
+    // Parent: clone succeeded, return 0
+    return 0;
+  } else {
+    // Clone failed, free the allocated stack
+    free(stack);
+    return -1;
   }
 }
 ```
 
-**`exec_sched_tickets(int n)`**: Kernel function that sets tickets
+**Spin Lock Implementation**:
 ```c
-void exec_sched_tickets(int n){
-  struct proc *p = myproc();
-  if(n < 1 || n > 10000) {
-    return;  // Invalid ticket value
-  }
-  acquire(&p->lock);
-  p->tickets = n;
-  release(&p->lock);
+void lock_init(lock_t* lock)
+{
+  lock->locked = 0;
+}
+
+void lock_acquire(lock_t* lock)
+{
+  // Spin until we acquire the lock using atomic test-and-set
+  while(__sync_lock_test_and_set(&lock->locked, 1) != 0)
+    ;  // spin
+}
+
+void lock_release(lock_t* lock)
+{
+  __sync_lock_release(&lock->locked);
 }
 ```
 
-### 3.6 Scheduling Count Tracking
-
-Every time a process is scheduled, `sched_count` is incremented. This happens in all three schedulers:
-- Lottery scheduler: Increment before `swtch()`
-- Stride scheduler: Increment before `swtch()`
-- Round-robin scheduler: Increment before `swtch()`
-
-This allows tracking how many times each process has been scheduled, regardless of which scheduler is used.
-
-## 4. Key Technical Challenges
-
-### 4.1 Race Condition Prevention
-
-**Problem**: Between calculating total tickets and selecting a process, process states may change.
-
-**Solution**: 
-- Hold lock on chosen process until `swtch()` completes
-- Double-check process state before scheduling
-- Release lock only after process is scheduled or state check fails
-
-### 4.2 Lock Management
-
-**Problem**: In Stride scheduler, when updating `chosen` to a new process, the previous `chosen` process's lock was not released, causing lock leak and deadlock.
-
-**Solution**: Always release previous `chosen` process's lock before updating to a new process:
-```c
-if(chosen != 0) {
-  release(&chosen->lock);
-}
-chosen = p;
-```
-
-### 4.3 Stride Scheduler Initialization
-
-**Problem**: Initializing `min_pass = 0` made the condition `p->pass < min_pass` always false since all passes are positive.
-
-**Solution**: Initialize `min_pass = 0x7FFFFFFF` (maximum int value) to ensure first process is always found.
+The spin lock uses GCC's built-in atomic operations:
+- `__sync_lock_test_and_set`: Atomically sets the value to 1 and returns the previous value
+- `__sync_lock_release`: Atomically sets the value to 0
 
 ## 5. Files Modified
 
-1. **`kernel/proc.h`**: Added scheduler fields to `struct proc`
-2. **`kernel/proc.c`**: 
-   - Modified `allocproc()`: Initialize scheduler fields
-   - Modified `fork()`: Copy scheduler fields from parent
-   - Modified `scheduler()`: Implemented Lottery and Stride schedulers
-   - Added `rand()`: LFSR random number generator
-   - Added `print_sched_statistics()`: Print scheduling statistics
-   - Added `exec_sched_tickets()`: Set process tickets
-   - Modified all schedulers: Increment `sched_count` on scheduling
-3. **`kernel/syscall.h`**: Added system call numbers
-4. **`kernel/syscall.c`**: Registered new system calls
-5. **`kernel/sysproc.c`**: Implemented system call handlers
-6. **`kernel/defs.h`**: Added function declarations
-7. **`user/user.h`**: Added user-space function declarations
-8. **`user/usys.pl`**: Generated system call stubs
+1. **`kernel/proc.h`**: Added `thread_id` field to `struct proc`
+2. **`kernel/proc.c`**:
+   - Modified `allocproc()`: Initialize `thread_id` to 0
+   - Added `clone()`: Create child thread with shared address space
+   - Modified `freeproc()`: Handle thread-specific cleanup
+3. **`kernel/trap.c`**: Modified `usertrapret()` to pass correct trapframe address
+4. **`kernel/trampoline.S`**: New version accepting trapframe address as parameter
+5. **`kernel/syscall.h`**: Added `SYS_clone` definition
+6. **`kernel/syscall.c`**: Registered `sys_clone`
+7. **`kernel/sysproc.c`**: Implemented `sys_clone()` handler
+8. **`kernel/defs.h`**: Added `clone()` declaration
+9. **`user/user.h`**: Added `clone()` user-space declaration
+10. **`user/usys.pl`**: Added `clone` entry
+11. **`user/thread.h`**: New file - thread library header
+12. **`user/thread.c`**: New file - thread library implementation
+13. **`user/lab3_test.c`**: New file - test program
+14. **`Makefile`**: Set `CPUS := 3`, added `thread.o` to ULIB
 
 ## 6. Testing
 
-The implementation was tested using `lab2_test` program:
-- Creates multiple child processes with different ticket values
-- Runs for specified time
-- Prints scheduling statistics showing tickets and ticks for each process
-- Verifies that scheduling proportions match ticket ratios
+The implementation was tested using the `lab3_test` frisbee simulation program:
 
-```makefile
-make clean
-make qemu LAB2=STRIDE
+```bash
+# Build
+make clean && make
+
+# Run with 3 CPUs
+make qemu CPUS=3
+
+# Test commands in xv6 shell
+$ lab3_test 6 4
+$ lab3_test 10 3
+$ lab3_test 21 20
 ```
 
-Then run ` ./lab2_test [SLEEP] [N_PROC] [TICKET1] [TICKET2] ...` to start the test program. Example output:
+### Test Results
 
+**Test 1: lab3_test 6 4** (6 rounds, 4 threads)
 ```
-xv6 kernel is booting
-
-Stride scheduler
-init: starting sh
-$ ./lab2_test 100 3 30 20 10
-1(init): tickets: 7, ticks: 24
-2(sh): tickets: 7, ticks: 14
-3(lab2_test): tickets: 7, ticks: 21
-4(lab2_test): tickets: 30, ticks: 53
-5(lab2_test): tickets: 20, ticks: 36
-6(lab2_test): tickets: 10, ticks: 19
-$ QEMU 8.2.2 monitor - type 'help' for more information
-(qemu) quit
+$ lab3_test 6 4
+Round 1: thread 0 is passing the token to thread 1
+Round 2: thread 1 is passing the token to thread 2
+Round 3: thread 2 is passing the token to thread 3
+Round 4: thread 3 is passing the token to thread 0
+Round 5: thread 0 is passing the token to thread 1
+Round 6: thread 1 is passing the token to thread 2
+Frisbee simulation has finished, 6 rounds played in total
 ```
 
-## 7. Conclusion
+**Test 2: lab3_test 10 3** (10 rounds, 3 threads)
+```
+$ lab3_test 10 3
+Round 1: thread 0 is passing the token to thread 1
+Round 2: thread 1 is passing the token to thread 2
+Round 3: thread 2 is passing the token to thread 0
+...
+Round 10: thread 0 is passing the token to thread 1
+Frisbee simulation has finished, 10 rounds played in total
+```
 
-This lab successfully implements two proportional-share scheduling algorithms in xv6. The Lottery scheduler uses probabilistic selection based on tickets, while Stride scheduler provides deterministic proportional allocation. Both schedulers correctly track scheduling counts and support dynamic ticket assignment through system calls. The implementation handles race conditions and lock management carefully to ensure correctness.
+**Test 3: lab3_test 21 20** (21 rounds, 20 threads)
+```
+$ lab3_test 21 20
+Round 1: thread 0 is passing the token to thread 1
+Round 2: thread 1 is passing the token to thread 2
+...
+Round 20: thread 19 is passing the token to thread 0
+Round 21: thread 0 is passing the token to thread 1
+Frisbee simulation has finished, 21 rounds played in total
+```
+
+All tests run on 3 emulated CPUs (verified by "hart 1 starting" and "hart 2 starting" messages).
 
